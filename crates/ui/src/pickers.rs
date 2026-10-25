@@ -337,73 +337,11 @@ fn is_windows_path(path: &str) -> bool {
 /// POSIX spelling and directory casing (Windows directories can be case
 /// sensitive). Prefix aliases are equivalent only for ordinary Windows names.
 pub fn folder_path_key(path: &str) -> String {
-    let Some(windows) = windows_browser_path(path) else {
-        return path.to_owned();
-    };
-    let rest = windows.normalized_rest();
-    let ordinary_name = |name: &str| {
-        let stem = name.split('.').next().unwrap_or_default();
-        let reserved = matches!(
-            stem.to_ascii_uppercase().as_str(),
-            "CON" | "PRN" | "AUX" | "NUL"
-        ) || stem.get(..3).is_some_and(|prefix| {
-            (prefix.eq_ignore_ascii_case("COM") || prefix.eq_ignore_ascii_case("LPT"))
-                && matches!(
-                    &stem[3..],
-                    "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
-                )
-        });
-        !name.ends_with(['.', ' '])
-            && !name.contains(['/', ':', '*', '?', '"', '<', '>', '|'])
-            && !name.chars().any(char::is_control)
-            && !reserved
-    };
-    let unc_root = windows.extended
-        && windows
-            .root
-            .get(4..8)
-            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("UNC\\"));
-    let ordinary_names = rest.split('\\').all(ordinary_name)
-        && (!unc_root || windows.root[8..].split('\\').all(ordinary_name));
-    let root = if windows.extended && ordinary_names {
-        let tail = &windows.root[4..];
-        if tail
-            .get(..4)
-            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("UNC\\"))
-        {
-            format!(r"\\{}", &tail[4..])
-        } else {
-            tail.to_owned()
-        }
-    } else if windows.extended {
-        windows.root.to_owned()
-    } else {
-        windows.root.replace('/', "\\")
-    };
-    // Drive letters never distinguish case (`c:` is `C:`). Folder names keep
-    // theirs: a directory can be made case-sensitive (`fsutil
-    // setCaseSensitiveInfo`), so `Repo` and `repo` may be different folders.
-    let root = uppercase_drive_letter(root);
-    if rest.is_empty() {
-        format!("{root}\\")
-    } else {
-        format!("{root}\\{rest}")
-    }
-}
-
-/// `c:` → `C:`, also behind an extended `\\?\` prefix; other roots unchanged.
-fn uppercase_drive_letter(mut root: String) -> String {
-    let drive = root.strip_prefix(r"\\?\").unwrap_or(&root);
-    let bytes = drive.as_bytes();
-    if bytes.len() == 2 && bytes[1] == b':' && bytes[0].is_ascii_lowercase() {
-        let at = root.len() - 2;
-        root[at..at + 1].make_ascii_uppercase();
-    }
-    root
+    zeron_proto::device_paths::folder_path_key(path)
 }
 
 pub fn same_folder_path(left: &str, right: &str) -> bool {
-    folder_path_key(left) == folder_path_key(right)
+    zeron_proto::device_paths::same_folder_path(left, right)
 }
 
 /// Parent of an absolute path; `None` at the filesystem root.
@@ -6834,10 +6772,13 @@ mod tests {
         let state = cx.new(|_| {
             let mut state = AppState::new();
             state.local_device_id = Some("mac".into());
-            state.chats.push(serde_json::from_value(serde_json::json!({
-                "id":"cloud-chat", "deviceId":"cloud-machine", "archived":false,
-                "createdAt":"2026-09-01T00:00:00Z",
-            })).unwrap());
+            state.chats.push(
+                serde_json::from_value(serde_json::json!({
+                    "id":"cloud-chat", "deviceId":"cloud-machine", "archived":false,
+                    "createdAt":"2026-09-01T00:00:00Z",
+                }))
+                .unwrap(),
+            );
             state
         });
         let pickers = cx.new(|cx| Pickers::new(state.clone(), cx));
@@ -6855,7 +6796,9 @@ mod tests {
             assert_eq!(pickers.catalog_owner.as_deref(), Some("cloud-machine"));
         });
         assert_eq!(
-            state.read_with(cx, |state, _| state.effective_device_id()).as_deref(),
+            state
+                .read_with(cx, |state, _| state.effective_device_id())
+                .as_deref(),
             Some("mac")
         );
         // Back on the new-chat canvas, the Mac's catalogs again.
@@ -7017,7 +6960,10 @@ mod tests {
         });
         cx.run_until_parked();
         let sent = requests.try_recv().expect("a refs request went out");
-        assert!(sent.contains("ListCloudBranches") && sent.contains("acme/app"), "{sent}");
+        assert!(
+            sent.contains("ListCloudBranches") && sent.contains("acme/app"),
+            "{sent}"
+        );
         cx.update(|cx| {
             let pickers = pickers.read(cx);
             assert_eq!(
@@ -7221,19 +7167,38 @@ mod tests {
                 pickers.pick_harness(HarnessId::Codex, cx);
                 let resolved = pickers.resolved(cx);
                 assert_eq!(resolved.harness, Some(HarnessId::Codex));
-                assert_eq!(resolved.model, None, "the old provider's model must not linger");
+                assert_eq!(
+                    resolved.model, None,
+                    "the old provider's model must not linger"
+                );
                 assert!(resolved.model_options.is_empty());
-                assert!(pickers.mutate_task.is_some(), "a saved chat persists the switch");
+                assert!(
+                    pickers.mutate_task.is_some(),
+                    "a saved chat persists the switch"
+                );
             });
             (state, pickers)
         });
         cx.run_until_parked();
         let sent = requests.try_recv().expect("setChatConfig went out");
-        assert!(sent.contains("setChatConfig") && sent.contains("\"codex\""), "{sent}");
+        assert!(
+            sent.contains("setChatConfig") && sent.contains("\"codex\""),
+            "{sent}"
+        );
         cx.update(|cx| {
-            let row = state.read(cx).selected_chat_row().unwrap().config.clone().unwrap();
+            let row = state
+                .read(cx)
+                .selected_chat_row()
+                .unwrap()
+                .config
+                .clone()
+                .unwrap();
             assert_eq!(row.harness, HarnessId::Codex);
-            assert_eq!(row.sandbox, zeron_proto::SandboxLevel::ReadOnly, "sandbox is kept");
+            assert_eq!(
+                row.sandbox,
+                zeron_proto::SandboxLevel::ReadOnly,
+                "sandbox is kept"
+            );
 
             // A turn starts: the switch is refused until it ends.
             state.update(cx, |state, _| {
@@ -7245,7 +7210,10 @@ mod tests {
                 assert_eq!(pickers.resolved(cx).harness, Some(HarnessId::Codex));
             });
             state.update(cx, |state, _| state.apply_sessions(Vec::new()));
-            assert!(!pickers.read(cx).harness_locked(cx), "unlocks when the turn ends");
+            assert!(
+                !pickers.read(cx).harness_locked(cx),
+                "unlocks when the turn ends"
+            );
         });
     }
 
@@ -7276,7 +7244,11 @@ mod tests {
             pickers.update(cx, |pickers, cx| {
                 pickers.show_compact_models(cx);
                 assert_eq!(pickers.model_rail, ModelRail::Harness);
-                assert_eq!(providers(pickers, cx), vec![HarnessId::Codex], "locked mid-turn");
+                assert_eq!(
+                    providers(pickers, cx),
+                    vec![HarnessId::Codex],
+                    "locked mid-turn"
+                );
                 pickers.pick_compact_provider(HarnessId::ClaudeCode, cx);
                 assert_eq!(pickers.resolved(cx).harness, Some(HarnessId::Codex));
             });

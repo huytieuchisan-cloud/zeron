@@ -4,6 +4,8 @@
 pub use std::process::Stdio;
 #[cfg(not(windows))]
 pub use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+#[cfg(any(windows, test))]
+pub(crate) mod cmd_shim;
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]

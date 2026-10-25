@@ -46,7 +46,6 @@ use futures::StreamExt;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use serde_json::{Value, json};
-use tokio::io::AsyncBufReadExt;
 use tokio::sync::mpsc;
 
 use zeron_proto::{
@@ -1315,6 +1314,7 @@ impl AcpHarness {
             request_draining(&client, &mut incoming, "logout", json!({})).await
         };
         let result = tokio::time::timeout(SIGN_OUT_TIMEOUT, flow).await;
+        client.close_stdin_for_teardown();
         child.shutdown(self.kill_grace).await;
         match result {
             Ok(outcome) => outcome.map(|_| ()),
@@ -1413,7 +1413,7 @@ impl AcpHarness {
             let on_progress = on_progress.clone();
             let announced = announced.clone();
             tokio::spawn(async move {
-                let mut lines = tokio::io::BufReader::new(stderr).lines();
+                let mut lines = crate::lossy_lines::lossy_lines(stderr);
                 while let Ok(Some(line)) = lines.next_line().await {
                     // Sign-in output carries authorize urls and device codes.
                     tracing::debug!(
@@ -1739,7 +1739,7 @@ impl AcpHarness {
             let prompted = sign_in_prompted.clone();
             let harness = self.spec.id;
             tokio::spawn(async move {
-                let mut lines = tokio::io::BufReader::new(stderr).lines();
+                let mut lines = crate::lossy_lines::lossy_lines(stderr);
                 while let Ok(Some(line)) = lines.next_line().await {
                     tracing::debug!(target: "zeron_harness::acp", "stderr: {line}");
                     tail.push(&line);
@@ -1827,6 +1827,7 @@ impl AcpHarness {
         let discovery =
             unless_sign_in_prompted(discovery, &sign_in_prompted, self.spec.display_name);
         let result = tokio::time::timeout(self.model_discovery_timeout, discovery).await;
+        client.close_stdin_for_teardown();
         child.shutdown(self.kill_grace).await;
         match result {
             Ok(inner) => inner,
@@ -1880,6 +1881,7 @@ impl AcpHarness {
         let discovery =
             unless_sign_in_prompted(discovery, &sign_in_prompted, self.spec.display_name);
         let result = tokio::time::timeout(self.model_discovery_timeout, discovery).await;
+        client.close_stdin_for_teardown();
         child.shutdown(self.kill_grace).await;
         match result {
             Ok(inner) => inner,
@@ -3894,6 +3896,7 @@ async fn run_session(session: Session) {
                             session_id: None,
                         }))
                         .await;
+                    client.close_stdin_for_teardown();
                     child.shutdown(kill_grace).await;
                     return;
                 }
@@ -3908,6 +3911,7 @@ async fn run_session(session: Session) {
                     session_id: None,
                 }))
                 .await;
+            client.close_stdin_for_teardown();
             child.shutdown(kill_grace).await;
             return;
         }
@@ -3927,6 +3931,7 @@ async fn run_session(session: Session) {
     )
     .await
     {
+        client.close_stdin_for_teardown();
         child.shutdown(kill_grace).await;
         return;
     }
@@ -3939,6 +3944,7 @@ async fn run_session(session: Session) {
         )
         .await
     {
+        client.close_stdin_for_teardown();
         child.shutdown(kill_grace).await;
         return;
     }
@@ -5065,6 +5071,7 @@ async fn run_session(session: Session) {
         }
     }
 
+    client.close_stdin_for_teardown();
     child.shutdown(kill_grace).await;
 }
 

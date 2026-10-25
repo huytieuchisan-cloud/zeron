@@ -44,7 +44,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::BoxStream;
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 
 use zeron_proto::{
@@ -390,7 +390,7 @@ impl Harness for CursorHarness {
         if let Some(stderr) = child.stderr.take() {
             let tail = stderr_tail.clone();
             tokio::spawn(async move {
-                let mut lines = BufReader::new(stderr).lines();
+                let mut lines = crate::lossy_lines::lossy_lines(stderr);
                 while let Ok(Some(line)) = lines.next_line().await {
                     tracing::debug!(target: "zeron_harness::cursor", "stderr: {line}");
                     tail.push(&line);
@@ -418,7 +418,7 @@ impl Harness for CursorHarness {
         tokio::spawn(run_session(Session {
             lease,
             child,
-            stdout_lines: BufReader::new(stdout).lines(),
+            stdout_lines: crate::lossy_lines::lossy_lines(stdout),
             stdin_tx,
             event_tx,
             controls,
@@ -585,7 +585,7 @@ async fn stdin_writer(mut stdin: ChildStdin, mut rx: mpsc::UnboundedReceiver<Str
 struct Session {
     lease: Option<state::Lease>,
     child: Child,
-    stdout_lines: tokio::io::Lines<BufReader<crate::process::ChildStdout>>,
+    stdout_lines: crate::lossy_lines::LossyLines<crate::process::ChildStdout>,
     stdin_tx: mpsc::UnboundedSender<String>,
     event_tx: mpsc::Sender<Result<AgentEvent, HarnessError>>,
     controls: RunControls,

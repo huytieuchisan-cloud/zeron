@@ -3,7 +3,7 @@ use super::Stdio;
 use std::ffi::{OsStr, OsString};
 use std::io;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf, Prefix};
 use windows_sys::Win32::Globalization::CompareStringOrdinal;
 use windows_sys::Win32::System::SystemInformation::{GetSystemDirectoryW, GetWindowsDirectoryW};
 
@@ -74,6 +74,21 @@ impl Command {
     }
 
     pub(super) fn prepare(&self) -> io::Result<Prepared> {
+        let cwd = self
+            .metadata
+            .get_current_dir()
+            .map(|dir| wide(dir.as_os_str()))
+            .transpose()?;
+        // CreateProcessW's error for a missing working directory reads like a
+        // missing executable to callers that treat NotFound as "not installed".
+        if let Some(dir) = self.metadata.get_current_dir()
+            && !dir.is_dir()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::NotADirectory,
+                format!("working directory {} does not exist", dir.display()),
+            ));
+        }
         let program = self.metadata.get_program();
         let program_wide = wide(program)?;
         if program_wide.len() == 1 || program_wide.contains(&(b'"' as u16)) {
@@ -116,13 +131,50 @@ impl Command {
         }
         block.push(0);
         let executable = resolve(program, child_path, child_pathext)?;
+        let mut launched = executable.clone();
         let (application, line) = if is_batch_script(&executable) {
-            // npm exposes CLIs as `.cmd`/`.bat` shims. Run them through
-            // `cmd.exe` with Rust-style batch argument escaping:
-            // unsafe line breaks are rejected, and the Job Object owns the tree
-            // through cmd.exe's membership.
-            let command = batch_command(&executable, self.metadata.get_args())?;
-            command
+            if let Some((target, leading)) = shim_launch(&executable, child_path) {
+                // An npm shim runs its node script or native binary directly:
+                // no cmd.exe limits on the working directory or arguments.
+                let line = native_line(
+                    &target,
+                    leading
+                        .iter()
+                        .map(OsString::as_os_str)
+                        .chain(self.metadata.get_args()),
+                )?;
+                launched = target;
+                (wide(launched.as_os_str())?, line)
+            } else {
+                if let Some(cwd) = self.metadata.get_current_dir()
+                    && is_unc_path(cwd)
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        format!(
+                            "cmd.exe cannot use UNC working directory '{}' for custom batch script '{}'",
+                            cwd.display(),
+                            executable.display()
+                        ),
+                    ));
+                }
+                // Other batch files run through `cmd.exe` with Rust-style
+                // batch argument escaping: unsafe line breaks are rejected,
+                // and the Job Object owns the tree through cmd.exe's membership.
+                let plain_batch = plain_path(&executable);
+                let (application, line) = batch_command(&plain_batch, self.metadata.get_args())?;
+                if line.len() > CMD_LINE_LIMIT {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "command line for {} is {} characters, over cmd.exe's {CMD_LINE_LIMIT}-character limit",
+                            plain_batch.display(),
+                            line.len()
+                        ),
+                    ));
+                }
+                (application, line)
+            }
         } else {
             let mut line = vec![b'"' as u16];
             line.extend_from_slice(&program_wide[..program_wide.len() - 1]);
@@ -139,14 +191,11 @@ impl Command {
             return Err(invalid("Windows command line exceeds 32767 UTF-16 units"));
         }
         Ok(Prepared {
+            launched,
             executable: application,
             line,
             environment: block,
-            cwd: self
-                .metadata
-                .get_current_dir()
-                .map(|dir| wide(dir.as_os_str()))
-                .transpose()?,
+            cwd,
         })
     }
 }
@@ -154,6 +203,89 @@ impl Command {
 fn is_batch_script(path: &Path) -> bool {
     path.extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat"))
+}
+
+fn is_unc_path(path: &Path) -> bool {
+    matches!(
+        path.components().next(),
+        Some(Component::Prefix(prefix))
+            if matches!(prefix.kind(), Prefix::UNC(_, _) | Prefix::VerbatimUNC(_, _))
+    )
+}
+
+/// The plain drive or UNC form of a verbatim path; cmd.exe cannot launch
+/// batch files through a `\\?\` verbatim prefix.
+pub(super) fn plain_path(path: &Path) -> PathBuf {
+    if let Some(path_str) = path.to_str() {
+        if let Some(rest) = path_str.strip_prefix(r"\\?\") {
+            if let Some(share) = rest.strip_prefix(r"UNC\") {
+                return PathBuf::from(format!(r"\\{share}"));
+            }
+            return PathBuf::from(rest);
+        }
+    }
+    path.to_path_buf()
+}
+
+/// cmd.exe rejects a command longer than this, after its own parsing.
+const CMD_LINE_LIMIT: usize = 8191;
+
+/// The program and leading arguments an npm `.cmd` shim would run, when
+/// the shim is one cmd-shim generated and its target exists. A node script
+/// prefers the `node.exe` beside the shim, like the shim itself, then the
+/// child's PATH (native images only: the shim drops `.JS` from PATHEXT).
+fn shim_launch(shim: &Path, child_path: Option<&OsStr>) -> Option<(PathBuf, Vec<OsString>)> {
+    use super::super::cmd_shim::{self, ShimTarget};
+    use std::io::Read;
+    let file = std::fs::File::open(shim).ok()?;
+    if file.metadata().ok()?.len() > cmd_shim::MAX_SHIM_BYTES {
+        return None;
+    }
+    let mut contents = String::new();
+    file.take(cmd_shim::MAX_SHIM_BYTES)
+        .read_to_string(&mut contents)
+        .ok()?;
+    let dir = shim.parent()?;
+    match cmd_shim::parse(&contents)? {
+        ShimTarget::Exe(relative) => {
+            let exe = std::path::absolute(dir.join(relative)).ok()?;
+            exe.is_file().then_some((exe, Vec::new()))
+        }
+        ShimTarget::Node { script, args } => {
+            let script = std::path::absolute(dir.join(script)).ok()?;
+            if !script.is_file() {
+                return None;
+            }
+            let beside = dir.join("node.exe");
+            let node = if beside.is_file() {
+                beside
+            } else {
+                resolve(
+                    OsStr::new("node"),
+                    child_path,
+                    Some(OsStr::new(".EXE;.COM")),
+                )
+                .ok()?
+            };
+            let mut leading: Vec<OsString> = args.into_iter().map(OsString::from).collect();
+            leading.push(script.into_os_string());
+            Some((node, leading))
+        }
+    }
+}
+
+/// A CRT-quoted command line for a native image.
+fn native_line<'a>(
+    program: &Path,
+    args: impl IntoIterator<Item = &'a OsStr>,
+) -> io::Result<Vec<u16>> {
+    let mut line = Vec::new();
+    quote(program.as_os_str(), &mut line)?;
+    for arg in args {
+        line.push(b' ' as u16);
+        quote(arg, &mut line)?;
+    }
+    Ok(line)
 }
 
 /// Extensions tried when a bare program name is searched on PATH, in PATHEXT
@@ -264,6 +396,9 @@ fn quote_batch_argument(arg: &OsStr, line: &mut Vec<u16>) -> io::Result<()> {
 }
 
 pub(super) struct Prepared {
+    /// The image CreateProcessW runs (cmd.exe aside): for a shim, its target.
+    #[allow(dead_code)]
+    pub launched: PathBuf,
     pub executable: Vec<u16>,
     pub line: Vec<u16>,
     pub environment: Vec<u16>,
@@ -302,7 +437,9 @@ fn resolve(
     let pathext = launchable_extensions(child_pathext.or(parent_pathext.as_deref()));
     let path = Path::new(program);
     if path.components().count() > 1 || path.is_absolute() {
-        if !program.as_encoded_bytes().contains(&b'.') {
+        // Judge the file name, not the path: `C:\Users\first.last\…\claude`
+        // still needs its PATHEXT variants.
+        if path.extension().is_none() {
             for extension in &pathext {
                 let mut suffixed = program.to_os_string();
                 suffixed.push(".");

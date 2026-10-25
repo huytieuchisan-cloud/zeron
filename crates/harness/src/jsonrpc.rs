@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::HarnessError;
@@ -58,6 +58,9 @@ pub(crate) struct RpcClient {
     writer: mpsc::UnboundedSender<String>,
     closed: Arc<AtomicBool>,
     voice_router: Arc<Mutex<Option<VoiceRouter>>>,
+    /// Ends the writer task (and with it the child's stdin) once the lines
+    /// already queued are written, whichever clones are still alive.
+    close_stdin: Arc<tokio::sync::Notify>,
 }
 
 impl RpcClient {
@@ -73,7 +76,8 @@ impl RpcClient {
         observer: Option<StdoutObserver>,
     ) -> (Self, mpsc::Receiver<Incoming>) {
         let (writer_tx, writer_rx) = mpsc::unbounded_channel::<String>();
-        tokio::spawn(write_loop(stdin, writer_rx));
+        let close_stdin = Arc::new(tokio::sync::Notify::new());
+        tokio::spawn(write_loop(stdin, writer_rx, close_stdin.clone()));
         let pending: Pending = Arc::default();
         let (incoming_tx, incoming_rx) = mpsc::channel(256);
         let closed = Arc::new(AtomicBool::new(false));
@@ -93,9 +97,25 @@ impl RpcClient {
                 writer: writer_tx,
                 closed,
                 voice_router,
+                close_stdin,
             },
             incoming_rx,
         )
+    }
+
+    /// Call before [`crate::shutdown_child`] / [`crate::shutdown_agent`]:
+    /// Windows' teardown gives the child its grace to exit on stdin EOF, and
+    /// the writer task keeps stdin open while any clone of this client is
+    /// alive. Unix teardown signals the child instead; its order is unchanged.
+    pub fn close_stdin_for_teardown(&self) {
+        #[cfg(windows)]
+        self.close_stdin();
+    }
+
+    /// Close the child's stdin once the lines already queued are written.
+    #[cfg(any(windows, test))]
+    fn close_stdin(&self) {
+        self.close_stdin.notify_one();
     }
 
     /// Route `thread/realtime/*` notifications (and `account/updated`) to a
@@ -209,8 +229,19 @@ impl RpcClient {
 
 /// Owns the child's stdin; a write failure (EPIPE after the child died) is
 /// tolerated and logged.
-async fn write_loop(mut stdin: ChildStdin, mut rx: mpsc::UnboundedReceiver<String>) {
-    while let Some(line) = rx.recv().await {
+async fn write_loop(
+    mut stdin: ChildStdin,
+    mut rx: mpsc::UnboundedReceiver<String>,
+    close: Arc<tokio::sync::Notify>,
+) {
+    loop {
+        // Queued lines first: a close only lands once they are written.
+        let line = tokio::select! {
+            biased;
+            line = rx.recv() => line,
+            () = close.notified() => None,
+        };
+        let Some(line) = line else { return };
         let write = async {
             stdin.write_all(line.as_bytes()).await?;
             stdin.write_all(b"\n").await?;
@@ -270,7 +301,7 @@ async fn read_loop(
     observer: Option<StdoutObserver>,
     voice_router: Arc<Mutex<Option<VoiceRouter>>>,
 ) {
-    let mut lines = BufReader::new(stdout).lines();
+    let mut lines = crate::lossy_lines::lossy_lines(stdout);
     // A read error ends the loop like EOF: either way the child's stdout is
     // unusable, pending requests must fail, and the session loop must know.
     while let Ok(Some(line)) = lines.next_line().await {
@@ -389,6 +420,7 @@ mod tests {
             writer,
             closed: Arc::new(AtomicBool::new(false)),
             voice_router: Arc::default(),
+            close_stdin: Arc::default(),
         };
         client.notify("session/cancel", Some(json!({"sessionId": "parent"})));
         let frame: Value = serde_json::from_str(&receiver.try_recv().unwrap()).unwrap();
@@ -408,6 +440,7 @@ mod tests {
             writer: mpsc::unbounded_channel().0,
             closed: Arc::new(AtomicBool::new(false)),
             voice_router: Arc::default(),
+            close_stdin: Arc::default(),
         };
         let (_old_rx, old) = client.subscribe_voice(|| {});
         let (_new_rx, new) = client.subscribe_voice(|| {});
@@ -426,6 +459,7 @@ mod tests {
             writer,
             closed: Arc::new(AtomicBool::new(true)),
             voice_router: Arc::default(),
+            close_stdin: Arc::default(),
         };
         let result = tokio::time::timeout(
             std::time::Duration::from_millis(100),

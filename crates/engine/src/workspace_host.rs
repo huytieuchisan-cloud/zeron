@@ -868,17 +868,17 @@ impl WorkspaceHost {
     fn space_for_path(&self, path: &str) -> Result<String, EngineError> {
         let device_id = &self.inner.config.device_id;
         let spaces = self.read(|doc| doc.read_spaces())?;
-        if let Some(space) = spaces
-            .iter()
-            .find(|s| s.device_id == *device_id && s.path == path)
-        {
+        if let Some(space) = spaces.iter().find(|s| {
+            s.device_id == *device_id && zeron_proto::device_paths::same_folder_path(&s.path, path)
+        }) {
             return Ok(space.id.clone());
         }
         let root = linked_worktree_root(std::path::Path::new(path));
         if let Some(root) = root.as_deref()
             && let Some(space) = spaces.iter().find(|s| {
                 s.device_id == *device_id
-                    && (s.path == root || same_file::is_same_file(&s.path, root).unwrap_or(false))
+                    && (zeron_proto::device_paths::same_folder_path(&s.path, root)
+                        || same_file::is_same_file(&s.path, root).unwrap_or(false))
             })
         {
             return Ok(space.id.clone());
@@ -1130,10 +1130,11 @@ impl WorkspaceHost {
         git_detected: bool,
     ) -> Result<(), EngineError> {
         let spaces = self.read(|doc| doc.read_spaces())?;
-        if spaces
-            .iter()
-            .any(|s| s.id == space_id || (s.device_id == device_id && s.path == path))
-        {
+        if spaces.iter().any(|s| {
+            s.id == space_id
+                || (s.device_id == device_id
+                    && zeron_proto::device_paths::same_folder_path(&s.path, path))
+        }) {
             return Ok(());
         }
         self.mutate(|doc| {
@@ -1175,7 +1176,7 @@ impl WorkspaceHost {
         if spaces.iter().any(|s| {
             s.id == space_id
                 || (s.device_id == device_id
-                    && (s.path == path
+                    && (zeron_proto::device_paths::same_folder_path(&s.path, path)
                         || s.github_repo
                             .as_deref()
                             .is_some_and(|repo| repo.eq_ignore_ascii_case(github_repo))))
@@ -2327,6 +2328,41 @@ mod tests {
             );
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
+    }
+
+    #[tokio::test]
+    async fn create_space_and_claim_chat_match_windows_folders_across_slash_styles() {
+        use super::*;
+
+        let dir = tempfile::tempdir().unwrap();
+        let host = WorkspaceHost::open(
+            Arc::new(DocsStore::open(dir.path()).unwrap()),
+            WorkspaceHostConfig {
+                device_id: "win-device".into(),
+                device_name: "Windows".into(),
+                platform: "windows".into(),
+                org_id: "test-org".into(),
+                user_id: "test-user".into(),
+                edge: None,
+                local_only: true,
+            },
+        )
+        .unwrap();
+        host.create_space("space-1", "win-device", r"C:\/code/my-project", None, false)
+            .unwrap();
+        host.create_space("space-2", "win-device", r"c:\code\my-project\", None, false)
+            .unwrap();
+        host.inner.publish();
+        let spaces = host.watch_spaces().borrow().clone();
+        assert_eq!(spaces.len(), 1);
+        assert_eq!(spaces[0].id, "space-1");
+
+        host.claim_chat("chat-1", Some(r"C:\code\my-project"))
+            .unwrap();
+        host.inner.publish();
+        let chats = host.watch_chats().borrow().clone();
+        assert_eq!(chats[0].space_id.as_deref(), Some("space-1"));
+        assert_eq!(host.watch_spaces().borrow().len(), 1);
     }
 
     #[test]

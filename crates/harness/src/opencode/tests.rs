@@ -2661,3 +2661,39 @@ fn native_skill_catalog_rejects_unrepresentable_commands() {
         assert_eq!(invocation_links(&invocation.link())[0].1, invocation);
     }
 }
+
+#[test]
+fn attachment_urls_survive_reserved_characters_and_windows_paths() {
+    for (path, url) in [
+        ("/tmp/shot.png", "file:///tmp/shot.png"),
+        ("/tmp/a b#c?%.png", "file:///tmp/a%20b%23c%3F%25.png"),
+        ("/tmp/Zoë/shot 1.png", "file:///tmp/Zo%C3%AB/shot%201.png"),
+        (
+            r"C:\Users\Zoë\shot 1#.png",
+            "file:///C:/Users/Zo%C3%AB/shot%201%23.png",
+        ),
+        ("c:/x/y.png", "file:///c:/x/y.png"),
+        (
+            r"\\server\share\dir\f g.png",
+            "file://server/share/dir/f%20g.png",
+        ),
+        (r"\\?\C:\a\b.png", "file:///C:/a/b.png"),
+        (r"\\?\UNC\server\share\f.png", "file://server/share/f.png"),
+    ] {
+        assert_eq!(file_url(path), url, "{path}");
+    }
+    let body = prompt_body("x", None, None, &[r"C:\Users\me\a b.png".to_owned()]);
+    assert_eq!(body["parts"][1]["url"], "file:///C:/Users/me/a%20b.png");
+    let body = prompt_body_v2("x", &["/tmp/a#b.png".to_owned()]);
+    assert_eq!(body["files"][0]["uri"], "file:///tmp/a%23b.png");
+    assert_eq!(body["files"][0]["name"], "a#b.png");
+}
+
+#[test]
+fn windows_directories_encode_like_encode_uri_component() {
+    // encodeURIComponent output, except `/` (which decodes the same).
+    assert_eq!(
+        encode_directory(r"C:\Users\Zoë\my proj"),
+        "C%3A%5CUsers%5CZo%C3%AB%5Cmy%20proj"
+    );
+}

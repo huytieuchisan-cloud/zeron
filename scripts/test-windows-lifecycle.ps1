@@ -83,9 +83,17 @@ try {
             elseif ($device -ne $firstDevice) { throw 'Reopening changed the persisted device identity' }
             "Run $run window class=$class; owner=$owner; HWND=$hwnd" | Add-Content -Encoding utf8 -LiteralPath (Join-Path $root 'result.txt')
             if (-not $p.CloseMainWindow()) { throw "Run $run could not request normal close" }
-            if (-not $p.WaitForExit(15000)) { throw "Run $run stayed alive 15s after window close" }
+            if (-not $p.WaitForExit(35000)) { throw "Run $run stayed alive beyond its bounded 30s shutdown budget" }
             if ($p.ExitCode -ne 0) { throw "Run $run closed with exit $($p.ExitCode)" }
             "Run $run normal close: exit 0" | Add-Content -Encoding utf8 -LiteralPath (Join-Path $root 'result.txt')
+            # Exit 0 alone hid double HWND destruction and cancelled engine drains.
+            $diagnostics = (Get-Content -LiteralPath $stdout -Raw) + "`n" + (Get-Content -LiteralPath $stderr -Raw)
+            if ($diagnostics -match '(?im)^.*(?:ERROR|WARN).*?(?:window not found|Invalid window handle|timed out waiting on app_will_quit)') {
+                throw "Run $run reported a window/shutdown lifecycle failure despite exit 0: $($Matches[0])"
+            }
+            if ($diagnostics -notmatch 'desktop shutdown complete') {
+                throw "Run $run exited without confirming its engine/viewport shutdown completed"
+            }
         } finally {
             $p.Refresh()
             if (-not $p.HasExited) {

@@ -19,10 +19,7 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
-use tokio::{
-    io::{AsyncBufReadExt, BufReader},
-    sync::mpsc,
-};
+use tokio::sync::mpsc;
 use zeron_proto::{AgentEvent, HarnessId, Model, ReasoningLevel, RunRequest, SteeringMode};
 
 pub struct PiHarness {
@@ -149,7 +146,7 @@ impl PiHarness {
             .transpose()?;
         let mut child = Child::new(cmd.spawn()?);
         let tail = crate::StderrTail::default();
-        let mut lines = BufReader::new(child.stderr.take().expect("piped stderr")).lines();
+        let mut lines = crate::lossy_lines::lossy_lines(child.stderr.take().expect("piped stderr"));
         let stderr = tail.clone();
         let stderr_task = tokio::spawn(async move {
             while let Ok(Some(line)) = lines.next_line().await {
@@ -227,6 +224,7 @@ impl Process {
     }
     async fn shutdown(&mut self, grace: Duration) {
         self.dialogs.cancel();
+        self.transport.close_input_for_teardown();
         self.child.shutdown(grace).await;
     }
 }

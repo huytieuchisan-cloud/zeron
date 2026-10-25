@@ -62,7 +62,6 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::BoxStream;
 use serde_json::{Value, json};
-use tokio::io::AsyncBufReadExt;
 use tokio::sync::mpsc;
 
 use zeron_proto::{
@@ -700,7 +699,7 @@ impl Server {
         if let Some(stderr) = child.stderr.take() {
             let tail = stderr_tail.clone();
             tokio::spawn(async move {
-                let mut lines = tokio::io::BufReader::new(stderr).lines();
+                let mut lines = crate::lossy_lines::lossy_lines(stderr);
                 while let Ok(Some(line)) = lines.next_line().await {
                     tracing::debug!(target: "zeron_harness::opencode", "stderr: {line}");
                     tail.push(&line);
@@ -1011,8 +1010,16 @@ fn http_client() -> reqwest::Client {
         .unwrap_or_default()
 }
 
-/// The official SDK sends `x-opencode-directory` percent-encoded.
+/// The official SDK sends `x-opencode-directory` percent-encoded. Both
+/// generations decode it with `decodeURIComponent`, so a Windows path
+/// (`C%3A%5CUsers%5C…`) arrives byte-identical to what the SDK's
+/// `encodeURIComponent` produces; `/` is left as is, which decodes the same.
 fn encode_directory(dir: &str) -> String {
+    percent_encode_path(dir)
+}
+
+/// Percent-encode every byte outside the unreserved set, keeping `/`.
+fn percent_encode_path(dir: &str) -> String {
     let mut out = String::with_capacity(dir.len());
     for b in dir.bytes() {
         match b {
@@ -2533,11 +2540,8 @@ fn prompt_body(
         parts.push(json!({
             "type": "file",
             "mime": mime_for(path),
-            "filename": std::path::Path::new(path)
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-            "url": format!("file://{path}"),
+            "filename": attachment_name(path),
+            "url": file_url(path),
         }));
     }
     let mut body = serde_json::Map::new();
@@ -2562,15 +2566,48 @@ fn prompt_body_v2(prompt: &str, attachments: &[String]) -> Value {
         .iter()
         .map(|path| {
             json!({
-                "uri": format!("file://{path}"),
-                "name": std::path::Path::new(path)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
+                "uri": file_url(path),
+                "name": attachment_name(path),
             })
         })
         .collect();
     json!({ "text": prompt, "files": files })
+}
+
+fn attachment_name(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// `path` as the `file:` URL Node's `fileURLToPath` (how both wires read an
+/// attachment) maps back to the same path. Every byte outside the unreserved
+/// set is percent-encoded, so `#`, `?`, `%` and spaces survive; a Windows
+/// drive path becomes `file:///C:/…`, a UNC path `file://server/share/…`
+/// (its server is the URL's host), and verbatim `\\?\` prefixes are dropped.
+fn file_url(path: &str) -> String {
+    let unc = path.strip_prefix(r"\\?\UNC\").or_else(|| {
+        path.strip_prefix(r"\\")
+            .filter(|rest| !rest.starts_with(r"?\"))
+    });
+    if let Some(unc) = unc {
+        let unc = unc.replace('\\', "/");
+        let (host, share) = unc.split_once('/').unwrap_or((&unc, ""));
+        return format!("file://{host}/{}", percent_encode_path(share));
+    }
+    let path = path.strip_prefix(r"\\?\").unwrap_or(path);
+    let bytes = path.as_bytes();
+    if bytes.len() >= 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes.get(2), None | Some(b'\\' | b'/'))
+    {
+        let rest = path[2..].replace('\\', "/");
+        return format!("file:///{}:{}", &path[..1], percent_encode_path(&rest));
+    }
+    let root = if path.starts_with('/') { "" } else { "/" };
+    format!("file://{root}{}", percent_encode_path(path))
 }
 
 fn mime_for(path: &str) -> &'static str {

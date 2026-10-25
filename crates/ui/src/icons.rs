@@ -191,10 +191,8 @@ icon_assets![
     // menu-check.tsx / logo.tsx).
     (TERMINAL, "terminal"),
     (CLOSE, "close"),
-    // Hand-drawn Linux caption glyphs (minimize dash, maximize square,
-    // restore stacked squares) in the same style as `close` — drawn for the
-    // client-side-decoration window controls; no system glyph font exists on
-    // Linux the way Segoe Fluent Icons does on Windows.
+    // Bundled caption glyphs shared by Linux and Windows. Windows 10 does
+    // not ship the Segoe Fluent Icons font used by Windows 11.
     (WINDOW_MINIMIZE, "window-minimize"),
     (WINDOW_MAXIMIZE, "window-maximize"),
     (WINDOW_RESTORE, "window-restore"),
@@ -389,6 +387,25 @@ mod tests {
                     .any(|pixel| pixel[3] != 0),
                 "{path} rasterizes to an empty image"
             );
+        }
+    }
+
+    #[test]
+    fn window_caption_icons_render_without_a_system_icon_font() {
+        let renderer = gpui::SvgRenderer::new(std::sync::Arc::new(Assets));
+        for path in [WINDOW_MINIMIZE, WINDOW_MAXIMIZE, WINDOW_RESTORE, CLOSE] {
+            let bytes = Assets.load(path).unwrap().expect("bundled caption icon");
+            for scale in [1.0, 1.25, 1.5, 2.0] {
+                let image = renderer.render_single_frame(&bytes, scale).unwrap();
+                assert!(
+                    image
+                        .as_bytes(0)
+                        .unwrap()
+                        .chunks_exact(4)
+                        .any(|pixel| pixel[3] != 0),
+                    "{path} is invisible at scale {scale}"
+                );
+            }
         }
     }
 

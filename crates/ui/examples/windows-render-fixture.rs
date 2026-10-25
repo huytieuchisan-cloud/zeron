@@ -1,5 +1,6 @@
 //! Static native-rendering regression. No engine, credentials, network, or user data.
 //! Run through scripts/test-windows-rendering.ps1 on an interactive Windows desktop.
+#![cfg_attr(windows, windows_subsystem = "windows")]
 use gpui::{
     AppContext, Bounds, Context, IntoElement, ParentElement, Render, Styled, TitlebarOptions,
     Window, WindowBounds, WindowOptions, div, img, point, px, rgb, size,

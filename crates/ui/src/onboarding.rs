@@ -210,7 +210,11 @@ impl Onboarding {
         let observe_state = cx.observe(&state, |this, state, cx| {
             if this.awaiting_sign_in && state.read(cx).signed_in() {
                 this.awaiting_sign_in = false;
-                let next = if this.github_in_flow(cx) { Step::Github } else { Step::Providers };
+                let next = if this.github_in_flow(cx) {
+                    Step::Github
+                } else {
+                    Step::Providers
+                };
                 this.go(next, cx);
             }
             // The edge answered that this account has no Cloud while on its
@@ -614,6 +618,10 @@ pub(crate) fn wide_button(
 ) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
+        .role(gpui::Role::Button)
+        .aria_label(label)
+        .tab_index(0)
+        .focus_visible(|style| style.border_2().border_color(theme.accent))
         .w_full()
         .h(px(36.0))
         .flex()
@@ -632,6 +640,10 @@ pub(crate) fn wide_button(
 fn quiet_link(theme: &Theme, id: &'static str, label: &'static str) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
+        .role(gpui::Role::Button)
+        .aria_label(label)
+        .tab_index(0)
+        .focus_visible(|style| style.border_2().border_color(theme.accent))
         .text_size(crate::typography::ui_rems(12.0))
         .text_color(theme.text_muted.opacity(0.7))
         .cursor_pointer()
@@ -647,6 +659,11 @@ pub(crate) fn primary(
 ) -> gpui::Stateful<gpui::Div> {
     popover::btn_primary(theme, label)
         .id(id)
+        .role(gpui::Role::Button)
+        .aria_label(label)
+        .tab_index(0)
+        .tab_stop(enabled)
+        .focus_visible(|style| style.border_2().border_color(theme.accent))
         .px(px(14.0))
         .when(!enabled, |el| el.opacity(0.35).cursor_default())
 }
@@ -656,7 +673,12 @@ pub(crate) fn ghost(
     id: &'static str,
     label: &'static str,
 ) -> gpui::Stateful<gpui::Div> {
-    popover::btn_ghost(theme, label, format!("{id}-fade")).id(id)
+    popover::btn_ghost(theme, label, format!("{id}-fade"))
+        .id(id)
+        .role(gpui::Role::Button)
+        .aria_label(label)
+        .tab_index(0)
+        .focus_visible(|style| style.border_2().border_color(theme.accent))
 }
 
 /// The way back (or out) on the left, the way forward on the right. The
@@ -854,6 +876,11 @@ impl Onboarding {
                 "onboarding-mode-{}",
                 mode.label()
             )))
+            .role(gpui::Role::Button)
+            .aria_label(format!("{} color scheme", mode.label()))
+            .aria_selected(selected)
+            .tab_index(0)
+            .focus_visible(|style| style.border_2().border_color(theme.accent))
             .on_click(cx.listener(move |_, _, _, cx| {
                 appearance::set_mode(mode, cx);
                 cx.notify();
@@ -867,6 +894,10 @@ impl Onboarding {
                 selection,
                 selection == current_accent,
             )
+            .role(gpui::Role::Button)
+            .aria_selected(selection == current_accent)
+            .tab_index(0)
+            .focus_visible(|style| style.border_2().border_color(theme.accent))
             .on_click(cx.listener(move |_, _, _, cx| {
                 appearance::set_accent(selection, cx);
                 cx.notify();
@@ -1400,6 +1431,69 @@ mod tests {
             can_install: true,
             enabled: None,
         }
+    }
+
+    struct KeyboardButtons {
+        clicks: std::rc::Rc<std::cell::RefCell<Vec<&'static str>>>,
+    }
+
+    impl gpui::Render for KeyboardButtons {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let theme = Theme::dark();
+            let button = |el: gpui::Stateful<gpui::Div>, label| {
+                let clicks = self.clicks.clone();
+                el.on_click(move |_, _, _| clicks.borrow_mut().push(label))
+            };
+            div().size_full().flex().flex_col().children([
+                button(wide_button(&theme, "start", "Get started"), "start").into_any_element(),
+                button(primary(&theme, "disabled", "Continue", false), "disabled")
+                    .into_any_element(),
+                button(primary(&theme, "next", "Continue", true), "next").into_any_element(),
+                button(ghost(&theme, "back", "Back"), "back").into_any_element(),
+                button(quiet_link(&theme, "skip", "Skip"), "skip").into_any_element(),
+            ])
+        }
+    }
+
+    #[gpui::test]
+    fn onboarding_actions_are_keyboard_accessible_and_skip_disabled_continue(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let clicks = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let window = cx.add_window({
+            let clicks = clicks.clone();
+            move |_, _| KeyboardButtons { clicks }
+        });
+        for (index, key) in ["enter", "space", "enter", "space"].into_iter().enumerate() {
+            cx.update_window(window.into(), |_, window, cx| {
+                window.draw(cx).clear();
+                window.focus_next(cx);
+                window.draw(cx).clear();
+            })
+            .unwrap();
+            cx.run_until_parked();
+            // simulate_keystrokes dispatches only KeyDown. Button activation
+            // deliberately waits for the paired KeyUp, just like real input.
+            cx.update_window(window.into(), |_, window, cx| {
+                let keystroke = gpui::Keystroke::parse(key).unwrap();
+                window.dispatch_event(
+                    gpui::PlatformInput::KeyDown(gpui::KeyDownEvent {
+                        keystroke: keystroke.clone(),
+                        is_held: false,
+                        prefer_character_input: false,
+                    }),
+                    cx,
+                );
+                window.dispatch_event(
+                    gpui::PlatformInput::KeyUp(gpui::KeyUpEvent { keystroke }),
+                    cx,
+                );
+            })
+            .unwrap();
+            cx.run_until_parked();
+            assert_eq!(clicks.borrow().len(), index + 1);
+        }
+        assert_eq!(&*clicks.borrow(), &["start", "next", "back", "skip"]);
     }
 
     #[test]

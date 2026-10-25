@@ -32,7 +32,6 @@ mod composer_markdown;
 mod context_usage;
 mod dictation;
 pub mod edge_fade;
-pub mod rounded_clip;
 pub mod file_icons;
 pub mod files;
 pub mod frost;
@@ -50,6 +49,7 @@ mod new_thread_background_effects;
 mod new_thread_background_image;
 mod new_thread_background_mask;
 mod notice;
+pub mod rounded_clip;
 pub use zeron_notify as notify;
 pub mod onboarding;
 pub mod orb;
@@ -74,11 +74,11 @@ pub mod state;
 pub(crate) mod surface_chrome;
 pub mod syntax_cache;
 pub mod terminal;
-mod todo_panel;
-pub(crate) mod tool_images;
 pub mod theme;
 pub mod theme_library;
 pub mod toast;
+mod todo_panel;
+pub(crate) mod tool_images;
 pub mod transcript;
 pub mod typography;
 pub mod visuals;
@@ -172,6 +172,9 @@ pub fn run_app(config: UiConfig) {
         }
     });
     app.run(move |cx: &mut App| {
+        // The embedded-engine fallback owns async agent teardown and SQLite
+        // flushes; GPUI's default 200ms budget cancels them even on an idle close.
+        cx.set_shutdown_timeout(std::time::Duration::from_secs(30));
         gpui_tokio::init_from_handle(cx, runtime_handle);
         gpui_base::init(cx);
         let data_dir = config.boot().data_dir.clone();
@@ -254,7 +257,9 @@ pub fn run_app(config: UiConfig) {
         // the choice with ZERON_EMBED_ENGINE=1. An embedded engine posts the
         // banners itself.
         zeron_engine::desktop_notify::enable();
-        if std::env::var_os("ZERON_EMBED_ENGINE").is_none_or(|value| value.is_empty() || value == "0") {
+        if std::env::var_os("ZERON_EMBED_ENGINE")
+            .is_none_or(|value| value.is_empty() || value == "0")
+        {
             state::launch_background_engine();
         }
         state::AppState::bootstrap(state.clone(), config.boot(), cx);
@@ -268,16 +273,27 @@ pub fn run_app(config: UiConfig) {
             // The background engine outlives this app: banners resume at
             // once rather than after the last focus report goes stale.
             let unfocus = quit_state.read(cx).viewport_closing();
-            let shutdown =
-                quit_state.read(cx).engine().cloned().map(|handle| {
-                    gpui_tokio::Tokio::spawn(cx, async move { handle.shutdown().await })
-                });
-            async move {
+            let engine = quit_state.read(cx).engine().cloned();
+            // Keep the entire sequence on Tokio. Notifying a half-shut-down
+            // embedded engine raced its RPC teardown; polling a Tokio-backed
+            // RPC directly on GPUI's shutdown executor could also stall it.
+            let shutdown = gpui_tokio::Tokio::spawn(cx, async move {
                 if let Some(unfocus) = unfocus {
-                    unfocus.await;
+                    if tokio::time::timeout(std::time::Duration::from_secs(1), unfocus)
+                        .await
+                        .is_err()
+                    {
+                        tracing::warn!("viewport closing notification timed out");
+                    }
                 }
-                if let Some(task) = shutdown {
-                    let _ = task.await;
+                if let Some(engine) = engine {
+                    engine.shutdown().await;
+                }
+                tracing::info!("desktop shutdown complete");
+            });
+            async move {
+                if let Err(error) = shutdown.await {
+                    tracing::error!(%error, "desktop shutdown task failed");
                 }
             }
         })

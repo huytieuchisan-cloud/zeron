@@ -57,7 +57,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::BoxStream;
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 
 use zeron_proto::{
@@ -356,7 +356,7 @@ impl ClaudeHarness {
                 .await
                 .map_err(HarnessError::Io)?;
             stdin.flush().await.map_err(HarnessError::Io)?;
-            let mut lines = BufReader::new(stdout).lines();
+            let mut lines = crate::lossy_lines::lossy_lines(stdout);
             while let Some(line) = lines.next_line().await.map_err(HarnessError::Io)? {
                 let Ok(frame) = serde_json::from_str::<Value>(&line) else {
                     continue;
@@ -647,7 +647,7 @@ impl ClaudeHarness {
         if let Some(stderr) = child.stderr.take() {
             let tail = stderr_tail.clone();
             tokio::spawn(async move {
-                let mut lines = BufReader::new(stderr).lines();
+                let mut lines = crate::lossy_lines::lossy_lines(stderr);
                 while let Ok(Some(line)) = lines.next_line().await {
                     tracing::debug!(target: "zeron_harness::claude", "stderr: {line}");
                     tail.push(&line);
@@ -684,7 +684,7 @@ impl ClaudeHarness {
             normalizer,
             title_only,
             child,
-            stdout_lines: BufReader::new(stdout).lines(),
+            stdout_lines: crate::lossy_lines::lossy_lines(stdout),
             first_command,
             stdin_tx,
             event_tx,
@@ -707,7 +707,9 @@ enum StdinMsg {
     Line(String),
     /// Close stdin (end of steering input): the CLI finishes the current turn
     /// and exits, which ends the run stream at stdout EOF.
-    Close,
+    Close {
+        settle_refresh: bool,
+    },
 }
 
 /// Anthropic's API caps inline images at 5MB of raw bytes; larger files stay
@@ -804,8 +806,10 @@ async fn stdin_writer(
                     return;
                 }
             }
-            StdinMsg::Close => {
-                refresh_lock::settle(&lock_dir, refresh_lock::SETTLE_MAX).await;
+            StdinMsg::Close { settle_refresh } => {
+                if settle_refresh {
+                    refresh_lock::settle(&lock_dir, refresh_lock::SETTLE_MAX).await;
+                }
                 let _ = stdin.shutdown().await;
                 return;
             }
@@ -817,7 +821,7 @@ struct Session {
     normalizer: Normalizer,
     title_only: bool,
     child: Child,
-    stdout_lines: tokio::io::Lines<BufReader<crate::process::ChildStdout>>,
+    stdout_lines: crate::lossy_lines::LossyLines<crate::process::ChildStdout>,
     /// The uuid the opening prompt was written with.
     first_command: String,
     stdin_tx: mpsc::UnboundedSender<StdinMsg>,
@@ -1120,7 +1124,9 @@ async fn run_session(session: Session) {
                     // Mailbox closed: end the input so the run can finish
                     // after the current turn.
                     steering_open = false;
-                    let _ = stdin_tx.send(StdinMsg::Close);
+                    let _ = stdin_tx.send(StdinMsg::Close {
+                        settle_refresh: true,
+                    });
                 }
             },
 
@@ -1256,6 +1262,10 @@ async fn run_session(session: Session) {
     if matches!(child.try_wait(), Ok(None)) {
         refresh_lock::settle(&lock_dir, refresh_lock::SETTLE_MAX).await;
     }
+    #[cfg(windows)]
+    let _ = stdin_tx.send(StdinMsg::Close {
+        settle_refresh: false,
+    });
     crate::shutdown_agent(&mut child, torn_down, kill_grace).await;
     if let Some(handle) = escalation {
         handle.abort();

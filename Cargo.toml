@@ -166,6 +166,14 @@ ignore = "0.4"
 # Pinned exactly: crates.io also carries `0.11.1-nightly.*` prereleases.
 fff-search = "=0.11.0"
 
+# Keep the UI and gpui-base on one GPUI type graph while adapting only the
+# pinned native Windows backend/lifecycle. The fork preserves upstream history.
+[patch."https://github.com/zeronsh/zui"]
+gpui = { git = "https://github.com/huytieuchisan-cloud/zui", rev = "1bfce54fbad57086e6db7db40782a8f7dfbdcedb" }
+gpui_platform = { git = "https://github.com/huytieuchisan-cloud/zui", rev = "1bfce54fbad57086e6db7db40782a8f7dfbdcedb" }
+gpui_tokio = { git = "https://github.com/huytieuchisan-cloud/zui", rev = "1bfce54fbad57086e6db7db40782a8f7dfbdcedb" }
+gpui_macros = { git = "https://github.com/huytieuchisan-cloud/zui", rev = "1bfce54fbad57086e6db7db40782a8f7dfbdcedb" }
+
 [profile.release]
 # Distribution profile (scripts/package-linux.sh): thin LTO buys most of fat
 # LTO's size/speed win at a fraction of the link time; strip debug symbols.

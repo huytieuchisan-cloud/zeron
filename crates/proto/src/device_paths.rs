@@ -85,6 +85,141 @@ pub fn expand_home(path: &str, home: &str) -> Option<String> {
     Some(child_folder(home, relative))
 }
 
+struct WindowsPathShape<'a> {
+    root: &'a str,
+    rest: &'a str,
+    extended: bool,
+}
+
+impl WindowsPathShape<'_> {
+    fn is_separator(&self, ch: char) -> bool {
+        ch == '\\' || (!self.extended && ch == '/')
+    }
+
+    fn normalized_rest(&self) -> String {
+        let rest = self.rest.trim_matches(|ch| self.is_separator(ch));
+        if self.extended {
+            rest.to_owned()
+        } else {
+            rest.replace('/', "\\")
+                .split('\\')
+                .filter(|segment| !segment.is_empty())
+                .collect::<Vec<_>>()
+                .join("\\")
+        }
+    }
+}
+
+fn windows_path_shape(path: &str) -> Option<WindowsPathShape<'_>> {
+    let extended = path.starts_with(r"\\?\");
+    let start = if extended { 4 } else { 0 };
+    let tail = &path[start..];
+    let bytes = tail.as_bytes();
+    if bytes.len() >= 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && bytes
+            .get(2)
+            .is_none_or(|b| *b == b'\\' || (!extended && *b == b'/'))
+    {
+        return Some(WindowsPathShape {
+            root: &path[..start + 2],
+            rest: &path[start + 2..],
+            extended,
+        });
+    }
+    let unc_start = if extended {
+        tail.get(..4)
+            .filter(|prefix| prefix.eq_ignore_ascii_case("UNC\\"))?;
+        8
+    } else if path.starts_with(r"\\") && !path.starts_with(r"\\.\") {
+        2
+    } else {
+        return None;
+    };
+    let is_separator = |ch| ch == '\\' || (!extended && ch == '/');
+    let server_end = unc_start + path[unc_start..].find(is_separator)?;
+    if server_end == unc_start {
+        return None;
+    }
+    let share_start = server_end + 1;
+    let share_end = path[share_start..]
+        .find(is_separator)
+        .map_or(path.len(), |at| share_start + at);
+    if share_end == share_start {
+        return None;
+    }
+    Some(WindowsPathShape {
+        root: &path[..share_end],
+        rest: &path[share_end..],
+        extended,
+    })
+}
+
+/// Lexical identity for folders and spaces across Windows separator styles,
+/// drive-letter casing, and `\\?\` aliases while preserving POSIX backslashes
+/// and directory casing.
+pub fn folder_path_key(path: &str) -> String {
+    let Some(windows) = windows_path_shape(path) else {
+        return path.to_owned();
+    };
+    let rest = windows.normalized_rest();
+    let ordinary_name = |name: &str| {
+        let stem = name.split('.').next().unwrap_or_default();
+        let reserved = matches!(
+            stem.to_ascii_uppercase().as_str(),
+            "CON" | "PRN" | "AUX" | "NUL"
+        ) || stem.get(..3).is_some_and(|prefix| {
+            (prefix.eq_ignore_ascii_case("COM") || prefix.eq_ignore_ascii_case("LPT"))
+                && matches!(
+                    &stem[3..],
+                    "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+                )
+        });
+        !name.ends_with(['.', ' '])
+            && !name.contains(['/', ':', '*', '?', '"', '<', '>', '|'])
+            && !name.chars().any(char::is_control)
+            && !reserved
+    };
+    let unc_root = windows.extended
+        && windows
+            .root
+            .get(4..8)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("UNC\\"));
+    let ordinary_names = rest.split('\\').all(ordinary_name)
+        && (!unc_root || windows.root[8..].split('\\').all(ordinary_name));
+    let mut root = if windows.extended && ordinary_names {
+        let tail = &windows.root[4..];
+        if tail
+            .get(..4)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("UNC\\"))
+        {
+            format!(r"\\{}", &tail[4..])
+        } else {
+            tail.to_owned()
+        }
+    } else if windows.extended {
+        windows.root.to_owned()
+    } else {
+        windows.root.replace('/', "\\")
+    };
+    let drive = root.strip_prefix(r"\\?\").unwrap_or(&root);
+    let bytes = drive.as_bytes();
+    if bytes.len() == 2 && bytes[1] == b':' && bytes[0].is_ascii_lowercase() {
+        let at = root.len() - 2;
+        root[at..at + 1].make_ascii_uppercase();
+    }
+    if rest.is_empty() {
+        format!("{root}\\")
+    } else {
+        format!("{root}\\{rest}")
+    }
+}
+
+pub fn same_folder_path(left: &str, right: &str) -> bool {
+    folder_path_key(left) == folder_path_key(right)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
