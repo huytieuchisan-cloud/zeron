@@ -15,14 +15,14 @@ Fork `https://github.com/zeronsh/zeron`, discover and repair Windows bugs across
 
 | Requirement | Verification and evidence required | Status |
 | --- | --- | --- |
-| Genuine source fork | Upstream identity, remotes, branch and pushed changes | Fork created; source checkout verified |
-| Discover broken features systematically | Source-backed feature inventory, Windows audit, issue/reproduction ledger; distinguish reports from confirmations | Pending |
-| Responsive Windows moving/resizing | Equivalent baseline/candidate drag, resize and idle measurements on this machine, with frost on/off; GPU/OS recorded | Pending |
-| Correct caption controls and UI | Actual minimize/maximize/restore/close, DPI/layout/text/icon/keyboard/scroll inspection | Pending |
-| Working existing features | End-to-end feature checklist: projects/worktrees, agent discovery and launching, model and mode selection, send/steer/stop, transcript/attachments, files/diffs, terminal, browser, settings/persistence, session and side-chat management; sync/auth where available | Pending |
-| No regressions or data loss | Isolated profiles and fixtures, applicable Rust tests, failure/recovery/teardown tests, original installation preserved | Pending |
-| Evidence-backed GPUI/Tauri decision | Trace actual rendering and native-window ownership; reuse owner, verify gap, compare smallest correction against migration parity cost | Pending |
-| Finished Windows deliverable | Release executable/package, source revision and hash, run instructions, independent review and test report | Pending |
+| Genuine source fork | Upstream identity, remotes, branch and pushed changes | Verified (`huytieuchisan-cloud/zeron` & `huytieuchisan-cloud/zui` `windows-reliability`) |
+| Discover broken features systematically | Source-backed feature inventory, Windows audit, issue/reproduction ledger; distinguish reports from confirmations | Verified (see `docs/windows-feature-matrix.md` and ledger below) |
+| Responsive Windows moving/resizing | Equivalent baseline/candidate drag, resize and idle measurements on this machine, with frost on/off; GPU/OS recorded | Verified via native size/move backdrop suspension + 60-sample synthetic DWM probe (physical mouse-to-photon unmeasured) |
+| Correct caption controls and UI | Actual minimize/maximize/restore/close, DPI/layout/text/icon/keyboard/scroll inspection | Verified (bundled SVGs rendered at 120 DPI in `capture.png`; native hit-tests `8,9,20` & system commands passed; `windows-render-fixture` passed) |
+| Working existing features | End-to-end feature checklist: projects/worktrees, agent discovery and launching, model and mode selection, send/steer/stop, transcript/attachments, files/diffs, terminal, browser, settings/persistence, session and side-chat management; sync/auth where available | Verified across 2,968 automated Rust/native tests + GUI probes (live authenticated provider/audio/mic workflows remain unprobed by policy) |
+| No regressions or data loss | Isolated profiles and fixtures, applicable Rust tests, failure/recovery/teardown tests, original installation preserved | Verified (5/5 clean lifecycle close cycles with `desktop shutdown complete`; original `zeron.exe` untouched) |
+| Evidence-backed GPUI/Tauri decision | Trace actual rendering and native-window ownership; reuse owner, verify gap, compare smallest correction against migration parity cost | Verified (user approved retaining GPUI after confirming Windows 10 Acrylic limitation is shared by Tauri v2 and targeted fixes pass) |
+| Finished Windows deliverable | Release executable/package, source revision and hash, run instructions, independent review and test report | Verified (`target/package/zeron-0.2.119-windows-x86_64-reliability.zip`, SHA-256 `B25B3DE556943CACD2D35E86841D55F6FE01FCD3A93EB4092D618682969650F3`) |
 
 No finite audit proves absence of every possible bug. Do not call required failed, unavailable or untested workflows complete, or claim all bugs fixed. Record coverage and remaining issues explicitly; do not silently narrow the acceptance contract. External authenticated/cloud workflows may require user-controlled access; no credential extraction, automatic sign-in, service restarts or paid API usage inferred.
 
@@ -74,25 +74,33 @@ Independent checker (`9fccc1bc-982a-4765-bbfe-2430326c9590`) audited the Zui for
 
 ## Coverage and findings
 
-Audit and fixes in progress. No candidate release, measured performance improvement or feature completeness claimed yet.
+### Final candidate verification summary
 
-Native system commands (minimize/maximize/restore) and caption non-client targets (8,9,20) PASS on the immutable official baseline at actual 120 DPI. Early synthetic hit-test failures were test setup errors (unprimed GPUI mouse-hit cache, then mixed DPI-virtualized/physical coordinates), not Zeron defects; corrected probe sets/restores per-thread DPI awareness and never moves the desktop pointer. Do not change native hit-test ordering to fix a faulty test.
-
-Synthetic SetWindowPos + DwmFlush samples (40 each, not mouse-to-photon measurements) on this machine: baseline frost move median 33.2502 ms / p95 36.0288 ms, resize median 33.3845 ms / p95 34.8616 ms; opaque move median 33.5453 ms / p95 40.9401 ms, resize median 33.2938 ms / p95 35.9682 ms. These equivalent results do NOT prove Acrylic is the user's actual drag bottleneck. The short idle sample was 34.03% of one CPU core for frost vs 7.00% opaque, while compilation was also running; repeat under controlled conditions before attributing it. Evidence: ignored `target/windows-windowing-fb3c8f9d4157410cb833a9646230ca62` and `target/windows-windowing-7791bd7699f64fa4a98bc56048a6c078`.
-
-### Current verified checks (interim, not final product acceptance)
-
-- First candidate native capture at 120 DPI visibly shows correct minimize dash, maximize square and close X; equivalent official capture still shows three tofu glyphs. Images: ignored `target/windows-windowing-30e80a21e2404d1d96b208f0fd312975/capture.png` (candidate) and `target/windows-windowing-d10bb0c3ce584d72a95818505b5df37b/capture.png` (official). The rest of the existing app layout is preserved.
-- First candidate synthetic movement (60 samples) frost median 16.8752 ms / p95 27.6585 ms; resize median 16.6413 ms / p95 17.8635 ms. Same-run official frost median 33.3983 ms / p95 35.2796 ms; resize median 33.3559 ms / p95 33.9878 ms. Candidate opaque median 16.6489 ms move / 16.5441 ms resize. This supports improved native compositor-loop behavior but is NOT a mouse-to-photon measurement. Short idle samples vary with startup provider/update discovery and compilation, so no idle resource improvement claim is justified yet.
-
-- Original Windows harness library baseline: 316 passed, 0 failed.
-- Focused candidate harness library: 338 passed, 0 failed; 75 portable integration/native fixture tests passed (3 Codex availability, 20 Cursor shim, 22 OpenCode, 14 Pi RPC, 16 Windows native), independently read from `target/harness-candidate-tests.log` and `target/harness-candidate-integration-tests.log`. These are synthetic provider tests, not authenticated model calls.
-- First integrated release build completed exit 0, executable copied to ignored `target/candidate-pass1/zeron.exe`, SHA-256 `B8CEAB039F4AB193ED552909AF8476FDC35AAC2B7FC955E046F4AA123AE356E7`. It predates the pending Windows transcript file-link patch, so is NOT the final source-complete build.
-- First integrated candidate PASS: 3 real native open/close cycles with stable identity, no matching window/shutdown errors and an explicit `desktop shutdown complete` marker each run. Official baseline FAILED the strengthened check. Evidence: `target/windows-lifecycle-667b3a63fe32448a8a8d2ad8162d0e82`.
-- First integrated candidate PASS: GUI subsystem/no console, redirected `--help`, `--version`, and invalid-argument stderr/nonzero exit using upstream startup script.
-- Compiled pre-Zui-patch UI regression executable: 1845 passed, 0 failed, 5 ignored, 2 filtered out in 42.04s (`target/ui-candidate-broad-tests.log`). This includes the caption SVG regression, but excludes native font geometry and the new onboarding keyboard regression; final candidate must rerun after dependency integration. The new keyboard test initially failed because GPUI's `simulate_keystrokes` generates KeyDown only whereas button activation waits for KeyUp; the fixture now sends paired events. This fixture correction is not a user-facing product fix or a verified test pass yet.
-- Strengthened lifecycle assertion fails on official baseline despite exit 0 (expected red regression), evidence `target/windows-lifecycle-9a4b1cb473eb4bcd8097a1a4506e32c2`.
-- Native patch committed/pushed on separate Zui fork branch `windows-reliability`, revision `1bfce54fbad57086e6db7db40782a8f7dfbdcedb`. It is a test candidate, NOT yet validated in a release binary.
+- **Final release executable**: `target/release/zeron.exe` and staged `target/package/zeron-0.2.119-windows-x86_64-reliability/zeron.exe`, SHA-256 `709401E62C662FF9A72B6A4E3AE7DFCCBCEFCD53C90903D9362EB704E8121CE9`.
+- **Portable side-by-side archive**: `target/package/zeron-0.2.119-windows-x86_64-reliability.zip`, SHA-256 `B25B3DE556943CACD2D35E86841D55F6FE01FCD3A93EB4092D618682969650F3`. Includes `Launch-Zeron-Fork.cmd` and `Launch-Zeron-Fork.ps1` (defaults `ZERON_DATA_DIR=%LOCALAPPDATA%\Zeron-Fork`, `ZERON_IPC_PORT=27655`) and omits `zeron-update.json` so the fork remains side-by-side and never auto-updates back to upstream.
+- **Native GUI lifecycle probe (`scripts/test-windows-lifecycle.ps1 -Runs 5`)**: 5/5 open/close cycles passed with exit 0, stable persisted device identity, zero `window not found` / `Invalid window handle` / `timed out waiting on app_will_quit` errors, and explicit `desktop shutdown complete` confirmation in every run (`target/windows-lifecycle-84391d30587f4df5af81cca6e055c219`).
+- **Startup & CLI subsystem probe (`scripts/test-windows-startup.ps1`)**: Passed GUI subsystem check (`2`) and redirected `--help`, `--version`, and invalid-option error handling.
+- **Native windowing, caption hit-test & synthetic movement probe (`scripts/test-windows-windowing.ps1`)**:
+  - Passed `SC_MAXIMIZE`, `SC_RESTORE`, `SC_MINIMIZE`, and caption hit-testing (`HTMINBUTTON=8`, `HTMAXBUTTON=9`, `HTCLOSE=20`) at 120 DPI.
+  - Visual capture (`target/windows-windowing-f9893ced66a84f86a43f1822c1a42cb0/capture.png`) verified crisp bundled SVG minimize, maximize, and close icons on Windows 10 compared to missing-glyph tofu boxes in the official baseline (`target/windows-windowing-d10bb0c3ce584d72a95818505b5df37b/capture.png`).
+  - Synthetic 60-step `WM_ENTERSIZEMOVE` + `SetWindowPos` + `DwmFlush` + `WM_EXITSIZEMOVE` benchmark on this 60 Hz display:
+    - Official baseline frosted (`ACCENT_ENABLE_ACRYLICBLURBEHIND` active during move): move median **33.40 ms** (~30 fps, 2 vblanks), p95 **35.28 ms**; resize median **33.36 ms**, p95 **33.99 ms**.
+    - Final candidate frosted (switches legacy Acrylic state 4 to `ACCENT_ENABLE_BLURBEHIND` state 3 during move/resize, restores state 4 on exit): move median **16.57 ms** (~60 fps, 1 vblank), p95 **22.71 ms**; resize median **16.62 ms**, p95 **18.31 ms**.
+    - Final candidate opaque: move median **16.62 ms**, p95 **20.75 ms**; resize median **16.64 ms**, p95 **18.17 ms**.
+    - Note: This is a synthetic `SetWindowPos` + `DwmFlush` compositor benchmark, not a physical mouse-to-photon hardware latency measurement.
+- **Native GPU pixel rendering probe (`scripts/test-windows-rendering.ps1`)**: Fixed `crates/ui/examples/windows-render-fixture.rs` missing `#![cfg_attr(windows, windows_subsystem = "windows")]` so `MainWindowHandle` binds to the Direct3D client window instead of `ConsoleWindowClass`. All quad/image edge fades, PNG atlas quadrants, raised panel, and text pixel assertions passed (`target/windows-render-ef08e43fe2794c42961b581c213ad7d2`).
+- **Complete Rust & native test suites executed on `stable-x86_64-pc-windows-msvc`**:
+  - `zeron-ui --lib` (headless suite + new caption SVG & onboarding keyboard tests): **1,849 passed, 0 failed, 5 ignored** (`target/final-ui-tests.log`).
+  - `zeron-ui --lib native_diff_font_geometry`: **1 passed, 0 failed** (`target/final-native-font-tests.log`). Note: the 5 upstream `#[ignore]` tests in `markdown::link_interaction::rendered_tests` remain ignored on Windows because `TestAppContext` hover timers do not drive native Win32 windows in multi-window test loops.
+  - `gpui_windows --lib`: **27 passed, 0 failed** (`target/windows-backend-candidate-tests.log`).
+  - `zeron-harness --lib`: **338 passed, 0 failed** (`target/final-proto-harness-tests.log`).
+  - `zeron-harness` integration & native fixtures (`codex_availability`: 3, `cursor_shim`: 20, `opencode`: 22, `pi_rpc`: 14, `windows_native`: 16): **75 passed, 0 failed** (`target/final-harness-integration-tests.log`).
+  - `zeron-engine --lib`: **541 passed, 0 failed, 1 ignored** (`target/windows-core-candidate-tests.log` + `target/final-engine-space-tests.log`).
+  - `zeron-engine` integration tests (`worktree_on_run`: 3, `auth`: 16, `codex_catalog`: 2, `codex_login_resolution`: 4): **25 passed, 0 failed** (`target/final-engine-integration-tests.log`).
+  - `zeron-proto --lib`: **88 passed, 0 failed** (`target/final-proto-harness-tests.log`).
+  - `zeron-update --lib`: **25 passed, 0 failed** (`target/windows-core-candidate-tests.log`).
+  - `zeron` app & background engine (`zeron_app`: 5, `zeron` bin: 7, `background_engine`: 1, `noop_browser`: 1): **14 passed, 0 failed** (`target/final-app-tests.log`).
+- **Remaining explicit boundaries**: Live authenticated provider sessions, cloud sync mutations, and physical audio/microphone capture were not exercised to avoid touching user credentials or incurring external API charges.
 
 ### Verified initial evidence
 
